@@ -1,0 +1,35 @@
+# Этот compose поднимает только обвязку: Caddy reverse proxy.
+# Контейнер OpenClaw запускается официальным scripts/docker/setup.sh из upstream-репо.
+# Оба сервиса живут в одной docker-сети, чтобы Caddy достучался до gateway по имени.
+
+name: elena
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT:-18789}
+    networks:
+      - default
+    extra_hosts:
+      # Чтобы Caddy достучался до gateway, который слушает loopback хоста.
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    name: elena_net

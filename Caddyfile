@@ -1,0 +1,33 @@
+# Caddyfile — автоматический Let's Encrypt + reverse proxy на OpenClaw gateway.
+# Если DOMAIN пуст — Caddy не делает TLS, отдаёт по :80 (только для отладки).
+
+{
+	email {$ACME_EMAIL}
+	# auto_https off  # раскомментировать только для локальной отладки
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Все запросы — на gateway хоста (loopback 127.0.0.1:18789)
+	reverse_proxy host.docker.internal:{$OPENCLAW_GATEWAY_PORT} {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Безопасные заголовки
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
