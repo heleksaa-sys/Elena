@@ -126,8 +126,20 @@ if [[ -n "${DOMAIN:-}" ]]; then
       log "Попытка pull $i/3 не удалась, жду 10 сек..."
       sleep 10
     done
-    docker compose up -d caddy || log "WARN: Caddy не стартовал — посмотри 'docker logs caddy'"
+    # Принудительно пересоздать (network_mode/ports могли поменяться)
+    docker compose down --remove-orphans 2>/dev/null || true
+    docker compose up -d --force-recreate caddy || log "WARN: Caddy не стартовал — посмотри 'docker logs caddy'"
   )
+
+  # --- Диагностика: что слушает gateway и видит ли его Caddy ---
+  log "Диагностика gateway:"
+  log "  ss -ltnp | grep $GW_PORT:"
+  ss -ltnp 2>/dev/null | grep ":$GW_PORT" | sed 's/^/    /' | tee -a /tmp/elena-diag || true
+  log "  curl 127.0.0.1:$GW_PORT с хоста:"
+  curl -fsS -m 5 -o /dev/null -w "    HTTP %{http_code}\n" "http://127.0.0.1:$GW_PORT/" || log "    хост не достучался"
+  log "  curl 127.0.0.1:$GW_PORT из контейнера caddy:"
+  (cd "$REPO_DIR" && docker compose exec -T caddy wget -qO- -T 5 "http://127.0.0.1:$GW_PORT/" >/dev/null 2>&1) \
+    && log "    OK" || log "    FAIL"
 else
   log "Не удалось определить публичный IP — Caddy не поднимаю"
 fi
