@@ -84,6 +84,22 @@ for key in OPENCLAW_GATEWAY_TOKEN GOG_KEYRING_PASSWORD; do
   fi
 done
 
+# --- 4.5 Firewall: блокируем порт gateway от внешних интерфейсов ---
+# Снаружи доступ только через 80/443 (Caddy), gateway открыт только через docker bridge.
+GW_PORT_FW="${OPENCLAW_GATEWAY_PORT:-18789}"
+if command -v iptables >/dev/null; then
+  # очищаем старое правило если было
+  iptables -D DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i eth0 -j DROP 2>/dev/null || true
+  iptables -I DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i eth0 -j DROP 2>/dev/null || true
+  # на случай если интерфейс называется иначе
+  EXT_IF=$(ip route | awk '/^default/ {print $5; exit}')
+  if [[ -n "$EXT_IF" && "$EXT_IF" != "eth0" ]]; then
+    iptables -D DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i "$EXT_IF" -j DROP 2>/dev/null || true
+    iptables -I DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i "$EXT_IF" -j DROP 2>/dev/null || true
+  fi
+  log "Firewall: порт $GW_PORT_FW заблокирован снаружи (DOCKER-USER)"
+fi
+
 # --- 5. Поднять OpenClaw через официальный setup.sh ---
 log "Запускаю официальный setup.sh с OPENCLAW_IMAGE=$OPENCLAW_IMAGE"
 cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
