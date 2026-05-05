@@ -41,22 +41,48 @@ mkdir -p "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}/workspace"
 chmod 700 "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}"
 chown -R 1000:1000 "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}"
 
-# --- 4. Сгенерировать токены если пусты ---
-generate_if_empty() {
-  local key="$1"; local current="${!key:-}"
-  if [[ -z "$current" ]]; then
-    local val; val="$(openssl rand -hex 32)"
-    log "Генерирую $key"
-    if grep -q "^$key=" "$REPO_DIR/.env"; then
-      sed -i "s|^$key=.*|$key=$val|" "$REPO_DIR/.env"
+# --- 4. Стабильные секреты: храним вне репо, не перегенерируем при каждом деплое ---
+SECRETS_DIR="${OPENCLAW_CONFIG_DIR:-/root/.openclaw}"
+SECRETS_FILE="$SECRETS_DIR/.elena-secrets.env"
+mkdir -p "$SECRETS_DIR"
+chmod 700 "$SECRETS_DIR"
+touch "$SECRETS_FILE"
+chmod 600 "$SECRETS_FILE"
+
+ensure_secret() {
+  local key="$1"
+  local current="${!key:-}"
+  # из CI секрет может прийти заданным — тогда сохраняем его
+  if [[ -n "$current" ]]; then
+    if grep -q "^$key=" "$SECRETS_FILE"; then
+      sed -i "s|^$key=.*|$key=$current|" "$SECRETS_FILE"
     else
-      printf '%s=%s\n' "$key" "$val" >> "$REPO_DIR/.env"
+      printf '%s=%s\n' "$key" "$current" >> "$SECRETS_FILE"
     fi
-    export "$key"="$val"
+    return
   fi
+  # из CI пусто — берём из локального файла, иначе генерим
+  if grep -q "^$key=" "$SECRETS_FILE"; then
+    current=$(grep "^$key=" "$SECRETS_FILE" | tail -1 | cut -d= -f2-)
+    log "Читаю $key из $SECRETS_FILE"
+  else
+    current="$(openssl rand -hex 32)"
+    log "Генерирую $key (первый раз)"
+    printf '%s=%s\n' "$key" "$current" >> "$SECRETS_FILE"
+  fi
+  export "$key"="$current"
 }
-generate_if_empty OPENCLAW_GATEWAY_TOKEN
-generate_if_empty GOG_KEYRING_PASSWORD
+ensure_secret OPENCLAW_GATEWAY_TOKEN
+ensure_secret GOG_KEYRING_PASSWORD
+
+# подставить актуальные значения в .env (для setup.sh)
+for key in OPENCLAW_GATEWAY_TOKEN GOG_KEYRING_PASSWORD; do
+  if grep -q "^$key=" "$REPO_DIR/.env"; then
+    sed -i "s|^$key=.*|$key=${!key}|" "$REPO_DIR/.env"
+  else
+    printf '%s=%s\n' "$key" "${!key}" >> "$REPO_DIR/.env"
+  fi
+done
 
 # --- 5. Поднять OpenClaw через официальный setup.sh ---
 log "Запускаю официальный setup.sh с OPENCLAW_IMAGE=$OPENCLAW_IMAGE"
@@ -70,21 +96,40 @@ cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
   bash scripts/docker/setup.sh
 )
 
-# --- 6. Caddy reverse proxy (опционально, только если задан DOMAIN) ---
+# --- 6. Caddy reverse proxy + автоматический sslip.io домен если свой не задан ---
+if [[ -z "${DOMAIN:-}" ]]; then
+  PUB_IP=$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null \
+        || curl -fsS -m 5 https://ifconfig.me 2>/dev/null \
+        || hostname -I | awk '{print $1}')
+  if [[ -n "$PUB_IP" ]]; then
+    DOMAIN="${PUB_IP//./-}.sslip.io"
+    log "Автоматический домен: $DOMAIN (через sslip.io)"
+    export DOMAIN
+    if grep -q "^DOMAIN=" "$REPO_DIR/.env"; then
+      sed -i "s|^DOMAIN=.*|DOMAIN=$DOMAIN|" "$REPO_DIR/.env"
+    else
+      printf 'DOMAIN=%s\n' "$DOMAIN" >> "$REPO_DIR/.env"
+    fi
+  fi
+fi
+
+if [[ -z "${ACME_EMAIL:-}" ]]; then
+  export ACME_EMAIL="admin@$DOMAIN"
+fi
+
 if [[ -n "${DOMAIN:-}" ]]; then
-  log "Поднимаю Caddy для домена $DOMAIN"
+  log "Поднимаю Caddy для $DOMAIN"
   (
     cd "$REPO_DIR"
-    # 3 попытки pull — Docker Hub бывает капризный
     for i in 1 2 3; do
       if docker compose pull caddy; then break; fi
-      log "Попытка $i/3 не удалась, жду 10 сек..."
+      log "Попытка pull $i/3 не удалась, жду 10 сек..."
       sleep 10
     done
-    docker compose up -d caddy || log "WARN: Caddy не стартовал, OpenClaw доступен напрямую через SSH-туннель"
+    docker compose up -d caddy || log "WARN: Caddy не стартовал — посмотри 'docker logs caddy'"
   )
 else
-  log "DOMAIN не задан — Caddy не поднимаю. Доступ через SSH-туннель: ssh -L 18789:127.0.0.1:18789 root@$(hostname -I | awk '{print $1}')"
+  log "Не удалось определить публичный IP — Caddy не поднимаю"
 fi
 
 # --- 7. Healthcheck ---
