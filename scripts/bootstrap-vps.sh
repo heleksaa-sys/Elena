@@ -41,22 +41,64 @@ mkdir -p "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}/workspace"
 chmod 700 "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}"
 chown -R 1000:1000 "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}"
 
-# --- 4. Сгенерировать токены если пусты ---
-generate_if_empty() {
-  local key="$1"; local current="${!key:-}"
-  if [[ -z "$current" ]]; then
-    local val; val="$(openssl rand -hex 32)"
-    log "Генерирую $key"
-    if grep -q "^$key=" "$REPO_DIR/.env"; then
-      sed -i "s|^$key=.*|$key=$val|" "$REPO_DIR/.env"
+# --- 4. Стабильные секреты: храним вне репо, не перегенерируем при каждом деплое ---
+SECRETS_DIR="${OPENCLAW_CONFIG_DIR:-/root/.openclaw}"
+SECRETS_FILE="$SECRETS_DIR/.elena-secrets.env"
+mkdir -p "$SECRETS_DIR"
+chmod 700 "$SECRETS_DIR"
+touch "$SECRETS_FILE"
+chmod 600 "$SECRETS_FILE"
+
+ensure_secret() {
+  local key="$1"
+  local current="${!key:-}"
+  # из CI секрет может прийти заданным — тогда сохраняем его
+  if [[ -n "$current" ]]; then
+    if grep -q "^$key=" "$SECRETS_FILE"; then
+      sed -i "s|^$key=.*|$key=$current|" "$SECRETS_FILE"
     else
-      printf '%s=%s\n' "$key" "$val" >> "$REPO_DIR/.env"
+      printf '%s=%s\n' "$key" "$current" >> "$SECRETS_FILE"
     fi
-    export "$key"="$val"
+    return
   fi
+  # из CI пусто — берём из локального файла, иначе генерим
+  if grep -q "^$key=" "$SECRETS_FILE"; then
+    current=$(grep "^$key=" "$SECRETS_FILE" | tail -1 | cut -d= -f2-)
+    log "Читаю $key из $SECRETS_FILE"
+  else
+    current="$(openssl rand -hex 32)"
+    log "Генерирую $key (первый раз)"
+    printf '%s=%s\n' "$key" "$current" >> "$SECRETS_FILE"
+  fi
+  export "$key"="$current"
 }
-generate_if_empty OPENCLAW_GATEWAY_TOKEN
-generate_if_empty GOG_KEYRING_PASSWORD
+ensure_secret OPENCLAW_GATEWAY_TOKEN
+ensure_secret GOG_KEYRING_PASSWORD
+
+# подставить актуальные значения в .env (для setup.sh)
+for key in OPENCLAW_GATEWAY_TOKEN GOG_KEYRING_PASSWORD; do
+  if grep -q "^$key=" "$REPO_DIR/.env"; then
+    sed -i "s|^$key=.*|$key=${!key}|" "$REPO_DIR/.env"
+  else
+    printf '%s=%s\n' "$key" "${!key}" >> "$REPO_DIR/.env"
+  fi
+done
+
+# --- 4.5 Firewall: блокируем порт gateway от внешних интерфейсов ---
+# Снаружи доступ только через 80/443 (Caddy), gateway открыт только через docker bridge.
+GW_PORT_FW="${OPENCLAW_GATEWAY_PORT:-18789}"
+if command -v iptables >/dev/null; then
+  # очищаем старое правило если было
+  iptables -D DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i eth0 -j DROP 2>/dev/null || true
+  iptables -I DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i eth0 -j DROP 2>/dev/null || true
+  # на случай если интерфейс называется иначе
+  EXT_IF=$(ip route | awk '/^default/ {print $5; exit}')
+  if [[ -n "$EXT_IF" && "$EXT_IF" != "eth0" ]]; then
+    iptables -D DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i "$EXT_IF" -j DROP 2>/dev/null || true
+    iptables -I DOCKER-USER -p tcp --dport "$GW_PORT_FW" -i "$EXT_IF" -j DROP 2>/dev/null || true
+  fi
+  log "Firewall: порт $GW_PORT_FW заблокирован снаружи (DOCKER-USER)"
+fi
 
 # --- 5. Поднять OpenClaw через официальный setup.sh ---
 log "Запускаю официальный setup.sh с OPENCLAW_IMAGE=$OPENCLAW_IMAGE"
@@ -70,22 +112,77 @@ cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
   bash scripts/docker/setup.sh
 )
 
-# --- 6. Caddy reverse proxy ---
-log "Поднимаю Caddy"
-(
-  cd "$REPO_DIR"
-  docker compose pull caddy
-  docker compose up -d caddy
-)
+# --- 6. Caddy reverse proxy + автоматический sslip.io домен если свой не задан ---
+if [[ -z "${DOMAIN:-}" ]]; then
+  PUB_IP=$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null \
+        || curl -fsS -m 5 https://ifconfig.me 2>/dev/null \
+        || hostname -I | awk '{print $1}')
+  if [[ -n "$PUB_IP" ]]; then
+    DOMAIN="${PUB_IP//./-}.sslip.io"
+    log "Автоматический домен: $DOMAIN (через sslip.io)"
+    export DOMAIN
+    if grep -q "^DOMAIN=" "$REPO_DIR/.env"; then
+      sed -i "s|^DOMAIN=.*|DOMAIN=$DOMAIN|" "$REPO_DIR/.env"
+    else
+      printf 'DOMAIN=%s\n' "$DOMAIN" >> "$REPO_DIR/.env"
+    fi
+  fi
+fi
+
+if [[ -z "${ACME_EMAIL:-}" ]]; then
+  export ACME_EMAIL="admin@$DOMAIN"
+fi
+
+if [[ -n "${DOMAIN:-}" ]]; then
+  log "Поднимаю Caddy для $DOMAIN"
+  (
+    cd "$REPO_DIR"
+    for i in 1 2 3; do
+      if docker compose pull caddy; then break; fi
+      log "Попытка pull $i/3 не удалась, жду 10 сек..."
+      sleep 10
+    done
+    # Принудительно пересоздать (network_mode/ports могли поменяться)
+    docker compose down --remove-orphans 2>/dev/null || true
+    docker compose up -d --force-recreate caddy || log "WARN: Caddy не стартовал — посмотри 'docker logs caddy'"
+  )
+
+  # --- Диагностика: что слушает gateway и видит ли его Caddy ---
+  log "Диагностика gateway:"
+  log "  ss -ltnp | grep $GW_PORT:"
+  ss -ltnp 2>/dev/null | grep ":$GW_PORT" | sed 's/^/    /' | tee -a /tmp/elena-diag || true
+  log "  curl 127.0.0.1:$GW_PORT с хоста:"
+  curl -fsS -m 5 -o /dev/null -w "    HTTP %{http_code}\n" "http://127.0.0.1:$GW_PORT/" || log "    хост не достучался"
+  log "  curl 127.0.0.1:$GW_PORT из контейнера caddy:"
+  (cd "$REPO_DIR" && docker compose exec -T caddy wget -qO- -T 5 "http://127.0.0.1:$GW_PORT/" >/dev/null 2>&1) \
+    && log "    OK" || log "    FAIL"
+else
+  log "Не удалось определить публичный IP — Caddy не поднимаю"
+fi
 
 # --- 7. Healthcheck ---
 log "Проверяю gateway"
 sleep 3
-if curl -fsS -m 5 "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}/healthz" >/dev/null 2>&1 \
-  || curl -fsS -m 5 "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}/" >/dev/null 2>&1; then
-  log "Gateway отвечает на 127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}"
+GW_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
+if curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/healthz" >/dev/null 2>&1 \
+  || curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/" >/dev/null 2>&1; then
+  log "Gateway отвечает на 127.0.0.1:$GW_PORT"
 else
   log "WARN: gateway пока не отвечает — посмотри 'docker logs' на VPS"
 fi
 
+# --- 8. Вытащить актуальный gateway token из onboarded конфига и положить в .env ---
+TOKEN_FROM_CONFIG=""
+if command -v jq >/dev/null 2>&1 && [[ -f "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}/openclaw.json" ]]; then
+  TOKEN_FROM_CONFIG=$(jq -r '.gateway.auth.token // empty' "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}/openclaw.json" 2>/dev/null || true)
+fi
+[[ -n "$TOKEN_FROM_CONFIG" ]] && export OPENCLAW_GATEWAY_TOKEN="$TOKEN_FROM_CONFIG"
+
+# Печатаем итог в формате, который deploy.yml положит в GitHub job summary.
+echo "::notice::OpenClaw gateway token: ${OPENCLAW_GATEWAY_TOKEN:-<unknown>}"
+echo "::notice::Gateway port: $GW_PORT (loopback)"
+[[ -n "${DOMAIN:-}" ]] && echo "::notice::HTTPS URL: https://$DOMAIN"
+
 log "Готово."
+
+# trigger: 20260504T121030Z
