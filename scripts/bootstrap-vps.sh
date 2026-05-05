@@ -70,23 +70,45 @@ cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
   bash scripts/docker/setup.sh
 )
 
-# --- 6. Caddy reverse proxy ---
-log "Поднимаю Caddy"
-(
-  cd "$REPO_DIR"
-  docker compose pull caddy
-  docker compose up -d caddy
-)
+# --- 6. Caddy reverse proxy (опционально, только если задан DOMAIN) ---
+if [[ -n "${DOMAIN:-}" ]]; then
+  log "Поднимаю Caddy для домена $DOMAIN"
+  (
+    cd "$REPO_DIR"
+    # 3 попытки pull — Docker Hub бывает капризный
+    for i in 1 2 3; do
+      if docker compose pull caddy; then break; fi
+      log "Попытка $i/3 не удалась, жду 10 сек..."
+      sleep 10
+    done
+    docker compose up -d caddy || log "WARN: Caddy не стартовал, OpenClaw доступен напрямую через SSH-туннель"
+  )
+else
+  log "DOMAIN не задан — Caddy не поднимаю. Доступ через SSH-туннель: ssh -L 18789:127.0.0.1:18789 root@$(hostname -I | awk '{print $1}')"
+fi
 
 # --- 7. Healthcheck ---
 log "Проверяю gateway"
 sleep 3
-if curl -fsS -m 5 "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}/healthz" >/dev/null 2>&1 \
-  || curl -fsS -m 5 "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}/" >/dev/null 2>&1; then
-  log "Gateway отвечает на 127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}"
+GW_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
+if curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/healthz" >/dev/null 2>&1 \
+  || curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/" >/dev/null 2>&1; then
+  log "Gateway отвечает на 127.0.0.1:$GW_PORT"
 else
   log "WARN: gateway пока не отвечает — посмотри 'docker logs' на VPS"
 fi
+
+# --- 8. Вытащить актуальный gateway token из onboarded конфига и положить в .env ---
+TOKEN_FROM_CONFIG=""
+if command -v jq >/dev/null 2>&1 && [[ -f "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}/openclaw.json" ]]; then
+  TOKEN_FROM_CONFIG=$(jq -r '.gateway.auth.token // empty' "${OPENCLAW_CONFIG_DIR:-/root/.openclaw}/openclaw.json" 2>/dev/null || true)
+fi
+[[ -n "$TOKEN_FROM_CONFIG" ]] && export OPENCLAW_GATEWAY_TOKEN="$TOKEN_FROM_CONFIG"
+
+# Печатаем итог в формате, который deploy.yml положит в GitHub job summary.
+echo "::notice::OpenClaw gateway token: ${OPENCLAW_GATEWAY_TOKEN:-<unknown>}"
+echo "::notice::Gateway port: $GW_PORT (loopback)"
+[[ -n "${DOMAIN:-}" ]] && echo "::notice::HTTPS URL: https://$DOMAIN"
 
 log "Готово."
 

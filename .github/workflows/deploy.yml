@@ -69,9 +69,41 @@ jobs:
       - name: Run bootstrap on VPS
         run: |
           SSH="sshpass -e ssh -p $VPS_PORT -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no"
+          set -o pipefail
           $SSH "$VPS_USER@$VPS_HOST" \
-            'cd /opt/elena && chmod +x scripts/bootstrap-vps.sh && bash scripts/bootstrap-vps.sh'
+            'cd /opt/elena && chmod +x scripts/bootstrap-vps.sh && bash scripts/bootstrap-vps.sh' \
+            2>&1 | tee bootstrap.log
+
+      - name: Publish gateway info to job summary
+        if: always()
+        run: |
+          if [[ -f bootstrap.log ]]; then
+            TOKEN=$(grep -oE 'gateway token: [a-f0-9]+' bootstrap.log | head -1 | awk '{print $3}')
+            PORT=$(grep -oE 'Gateway port: [0-9]+' bootstrap.log | head -1 | awk '{print $3}')
+            URL=$(grep -oE 'HTTPS URL: \S+' bootstrap.log | head -1 | awk '{print $3}')
+            {
+              echo "## OpenClaw deployed"
+              echo ""
+              if [[ -n "$URL" ]]; then
+                echo "**Открой в браузере:** $URL"
+              else
+                echo "**Доступ через SSH-туннель** (выполни в Termius на iPhone):"
+                echo ""
+                echo '```'
+                echo "ssh -L 18789:127.0.0.1:${PORT:-18789} $VPS_USER@$VPS_HOST"
+                echo '```'
+                echo ""
+                echo "Затем открой http://127.0.0.1:18789/ — и вставь токен ниже."
+              fi
+              echo ""
+              echo "**Gateway token** (хранить как пароль):"
+              echo ""
+              echo '```'
+              echo "${TOKEN:-<не нашёлся, возьми из bootstrap step выше>}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Cleanup
         if: always()
-        run: rm -f .env
+        run: rm -f .env bootstrap.log
