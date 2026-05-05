@@ -31,3 +31,17 @@
 		format console
 	}
 }
+
+# Резервный доступ по голому IP с самоподписанным сертификатом.
+# Полезно если sslip.io заблокирован у провайдера. Safari покажет предупреждение —
+# нажми «Дополнительно → Перейти», и работает.
+https:// {
+	tls internal
+
+	reverse_proxy 127.0.0.1:{$OPENCLAW_GATEWAY_PORT} {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
