@@ -110,7 +110,7 @@ cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
          OPENCLAW_GATEWAY_TOKEN GOG_KEYRING_PASSWORD \
          OPENCLAW_SKIP_ONBOARDING="${OPENCLAW_SKIP_ONBOARDING:-0}"
   bash scripts/docker/setup.sh
-)
+) || log "WARN: setup.sh завершился с ошибкой, но gateway-контейнер обычно остаётся работать"
 
 # --- 6. Caddy reverse proxy + автоматический sslip.io домен если свой не задан ---
 if [[ -z "${DOMAIN:-}" ]]; then
@@ -133,6 +133,8 @@ if [[ -z "${ACME_EMAIL:-}" ]]; then
   export ACME_EMAIL="admin@$DOMAIN"
 fi
 
+GW_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
+
 if [[ -n "${DOMAIN:-}" ]]; then
   log "Поднимаю Caddy для $DOMAIN"
   (
@@ -142,20 +144,9 @@ if [[ -n "${DOMAIN:-}" ]]; then
       log "Попытка pull $i/3 не удалась, жду 10 сек..."
       sleep 10
     done
-    # Принудительно пересоздать (network_mode/ports могли поменяться)
     docker compose down --remove-orphans 2>/dev/null || true
-    docker compose up -d --force-recreate caddy || log "WARN: Caddy не стартовал — посмотри 'docker logs caddy'"
-  )
-
-  # --- Диагностика: что слушает gateway и видит ли его Caddy ---
-  log "Диагностика gateway:"
-  log "  ss -ltnp | grep $GW_PORT:"
-  ss -ltnp 2>/dev/null | grep ":$GW_PORT" | sed 's/^/    /' | tee -a /tmp/elena-diag || true
-  log "  curl 127.0.0.1:$GW_PORT с хоста:"
-  curl -fsS -m 5 -o /dev/null -w "    HTTP %{http_code}\n" "http://127.0.0.1:$GW_PORT/" || log "    хост не достучался"
-  log "  curl 127.0.0.1:$GW_PORT из контейнера caddy:"
-  (cd "$REPO_DIR" && docker compose exec -T caddy wget -qO- -T 5 "http://127.0.0.1:$GW_PORT/" >/dev/null 2>&1) \
-    && log "    OK" || log "    FAIL"
+    docker compose up -d --force-recreate caddy
+  ) || log "WARN: Caddy не стартовал — посмотри 'docker logs <caddy-container>'"
 else
   log "Не удалось определить публичный IP — Caddy не поднимаю"
 fi
@@ -163,12 +154,19 @@ fi
 # --- 7. Healthcheck ---
 log "Проверяю gateway"
 sleep 3
-GW_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 if curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/healthz" >/dev/null 2>&1 \
   || curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/" >/dev/null 2>&1; then
   log "Gateway отвечает на 127.0.0.1:$GW_PORT"
 else
-  log "WARN: gateway пока не отвечает — посмотри 'docker logs' на VPS"
+  log "WARN: gateway пока не отвечает на 127.0.0.1:$GW_PORT"
+fi
+
+if [[ -n "${DOMAIN:-}" ]]; then
+  if curl -ksS -m 10 "https://$DOMAIN/" >/dev/null 2>&1; then
+    log "HTTPS на https://$DOMAIN работает"
+  else
+    log "WARN: HTTPS на $DOMAIN ещё не отвечает (Caddy может выпускать сертификат, попробуй через 30 сек)"
+  fi
 fi
 
 # --- 8. Вытащить актуальный gateway token из onboarded конфига и положить в .env ---

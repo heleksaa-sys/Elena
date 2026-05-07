@@ -39,7 +39,8 @@ https:// {
 	tls internal
 
 	reverse_proxy 127.0.0.1:{$OPENCLAW_GATEWAY_PORT} {
-		header_up Host {host}
+		# OpenClaw отбивает Host=IP, подменяем на основной домен.
+		header_up Host {$DOMAIN}
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Forwarded-Proto {scheme}
