@@ -15,6 +15,7 @@ services:
       - caddy_config:/config
     environment:
       DOMAIN: ${DOMAIN:-}
+      DOMAIN_ALT: ${DOMAIN_ALT:-}
       ACME_EMAIL: ${ACME_EMAIL:-}
       OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT:-18789}
 

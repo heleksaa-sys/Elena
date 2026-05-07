@@ -1,23 +1,21 @@
 # Caddyfile — автоматический Let's Encrypt + reverse proxy на OpenClaw gateway.
-# Если DOMAIN пуст — Caddy не делает TLS, отдаёт по :80 (только для отладки).
+# Поддерживаем два домена (sslip.io + nip.io) — если один заблокирован у провайдера,
+# второй обычно работает.
 
 {
 	email {$ACME_EMAIL}
-	# auto_https off  # раскомментировать только для локальной отладки
 }
 
-{$DOMAIN} {
+{$DOMAIN}, {$DOMAIN_ALT} {
 	encode zstd gzip
 
-	# Все запросы — на gateway на 127.0.0.1 (host networking)
 	reverse_proxy 127.0.0.1:{$OPENCLAW_GATEWAY_PORT} {
-		header_up Host {host}
+		header_up Host {$DOMAIN}
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Forwarded-Proto {scheme}
 	}
 
-	# Безопасные заголовки
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -29,20 +27,5 @@
 	log {
 		output stdout
 		format console
-	}
-}
-
-# Резервный доступ по голому IP с самоподписанным сертификатом.
-# Полезно если sslip.io заблокирован у провайдера. Safari покажет предупреждение —
-# нажми «Дополнительно → Перейти», и работает.
-https:// {
-	tls internal
-
-	reverse_proxy 127.0.0.1:{$OPENCLAW_GATEWAY_PORT} {
-		# OpenClaw отбивает Host=IP, подменяем на основной домен.
-		header_up Host {$DOMAIN}
-		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
 	}
 }

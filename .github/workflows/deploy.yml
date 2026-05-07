@@ -41,6 +41,7 @@ jobs:
           OPENCLAW_GATEWAY_TOKEN=${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
           GOG_KEYRING_PASSWORD=${{ secrets.GOG_KEYRING_PASSWORD }}
           DOMAIN=${{ secrets.DOMAIN }}
+          DOMAIN_ALT=${{ secrets.DOMAIN_ALT }}
           ACME_EMAIL=${{ secrets.ACME_EMAIL }}
           ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
@@ -81,11 +82,16 @@ jobs:
             TOKEN=$(grep -oE 'gateway token: [a-f0-9]+' bootstrap.log | head -1 | awk '{print $3}')
             PORT=$(grep -oE 'Gateway port: [0-9]+' bootstrap.log | head -1 | awk '{print $3}')
             URL=$(grep -oE 'HTTPS URL: \S+' bootstrap.log | head -1 | awk '{print $3}')
+            URL_ALT=$(grep -oE 'HTTPS URL \(alt\): \S+' bootstrap.log | head -1 | awk '{print $4}')
             {
               echo "## OpenClaw deployed"
               echo ""
               if [[ -n "$URL" ]]; then
-                echo "**Открой в браузере:** $URL"
+                echo "**Открой в браузере (основная ссылка):** $URL"
+                if [[ -n "$URL_ALT" ]]; then
+                  echo ""
+                  echo "**Запасная ссылка** (если основная не работает у провайдера): $URL_ALT"
+                fi
               else
                 echo "**Доступ через SSH-туннель** (выполни в Termius на iPhone):"
                 echo ""

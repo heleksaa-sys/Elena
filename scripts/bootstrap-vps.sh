@@ -119,18 +119,22 @@ if [[ -z "${DOMAIN:-}" ]]; then
         || hostname -I | awk '{print $1}')
   if [[ -n "$PUB_IP" ]]; then
     DOMAIN="${PUB_IP//./-}.sslip.io"
-    log "Автоматический домен: $DOMAIN (через sslip.io)"
-    export DOMAIN
-    if grep -q "^DOMAIN=" "$REPO_DIR/.env"; then
-      sed -i "s|^DOMAIN=.*|DOMAIN=$DOMAIN|" "$REPO_DIR/.env"
-    else
-      printf 'DOMAIN=%s\n' "$DOMAIN" >> "$REPO_DIR/.env"
-    fi
+    DOMAIN_ALT="${PUB_IP//./-}.nip.io"
+    log "Автоматические домены: $DOMAIN + $DOMAIN_ALT"
+    export DOMAIN DOMAIN_ALT
+    for k in DOMAIN DOMAIN_ALT; do
+      v="${!k}"
+      if grep -q "^$k=" "$REPO_DIR/.env"; then
+        sed -i "s|^$k=.*|$k=$v|" "$REPO_DIR/.env"
+      else
+        printf '%s=%s\n' "$k" "$v" >> "$REPO_DIR/.env"
+      fi
+    done
   fi
 fi
 
 if [[ -z "${ACME_EMAIL:-}" ]]; then
-  export ACME_EMAIL="admin@$DOMAIN"
+  export ACME_EMAIL="admin@${DOMAIN:-localhost}"
 fi
 
 GW_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
@@ -161,13 +165,14 @@ else
   log "WARN: gateway пока не отвечает на 127.0.0.1:$GW_PORT"
 fi
 
-if [[ -n "${DOMAIN:-}" ]]; then
-  if curl -ksS -m 10 "https://$DOMAIN/" >/dev/null 2>&1; then
-    log "HTTPS на https://$DOMAIN работает"
+for d in "${DOMAIN:-}" "${DOMAIN_ALT:-}"; do
+  [[ -z "$d" ]] && continue
+  if curl -ksS -m 10 "https://$d/" >/dev/null 2>&1; then
+    log "HTTPS на https://$d работает"
   else
-    log "WARN: HTTPS на $DOMAIN ещё не отвечает (Caddy может выпускать сертификат, попробуй через 30 сек)"
+    log "WARN: https://$d ещё не отвечает (Caddy может выпускать сертификат, подожди 30-60 сек)"
   fi
-fi
+done
 
 # --- 8. Вытащить актуальный gateway token из onboarded конфига и положить в .env ---
 TOKEN_FROM_CONFIG=""
@@ -180,7 +185,6 @@ fi
 echo "::notice::OpenClaw gateway token: ${OPENCLAW_GATEWAY_TOKEN:-<unknown>}"
 echo "::notice::Gateway port: $GW_PORT (loopback)"
 [[ -n "${DOMAIN:-}" ]] && echo "::notice::HTTPS URL: https://$DOMAIN"
+[[ -n "${DOMAIN_ALT:-}" ]] && echo "::notice::HTTPS URL (alt): https://$DOMAIN_ALT"
 
 log "Готово."
-
-# trigger: 20260504T121030Z
