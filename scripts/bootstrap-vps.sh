@@ -183,7 +183,7 @@ fi
 
 # Печатаем итог в формате, который deploy.yml положит в GitHub job summary.
 echo "::notice::OpenClaw gateway token: ${OPENCLAW_GATEWAY_TOKEN:-<unknown>}"
-echo "::notice::Gateway port: $GW_PORT (loopback)"
+echo "::notice::Gateway port: $GW_PORT"
 [[ -n "${DOMAIN:-}" ]] && echo "::notice::HTTPS URL: https://$DOMAIN"
 [[ -n "${DOMAIN_ALT:-}" ]] && echo "::notice::HTTPS URL (alt): https://$DOMAIN_ALT"
 
