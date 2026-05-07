@@ -101,18 +101,9 @@ if command -v iptables >/dev/null; then
 fi
 
 # --- 5. Поднять OpenClaw через официальный setup.sh ---
-log "Запускаю официальный setup.sh с OPENCLAW_IMAGE=$OPENCLAW_IMAGE"
-cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
-(
-  cd "$UPSTREAM_DIR"
-  export OPENCLAW_IMAGE OPENCLAW_GATEWAY_PORT OPENCLAW_GATEWAY_BIND \
-         OPENCLAW_CONFIG_DIR OPENCLAW_WORKSPACE_DIR OPENCLAW_TZ \
-         OPENCLAW_GATEWAY_TOKEN GOG_KEYRING_PASSWORD \
-         OPENCLAW_SKIP_ONBOARDING="${OPENCLAW_SKIP_ONBOARDING:-0}"
-  bash scripts/docker/setup.sh
-) || log "WARN: setup.sh завершился с ошибкой, но gateway-контейнер обычно остаётся работать"
 
-# --- 6. Caddy reverse proxy + автоматический sslip.io домен если свой не задан ---
+# Сначала определим публичный IP/домены чтобы пробросить allowedOrigins в setup.sh.
+# Caddy и доменная конфигурация будут позже, но allowedOrigins нужен setup.sh уже сейчас.
 if [[ -z "${DOMAIN:-}" ]]; then
   PUB_IP=$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null \
         || curl -fsS -m 5 https://ifconfig.me 2>/dev/null \
@@ -132,6 +123,31 @@ if [[ -z "${DOMAIN:-}" ]]; then
     done
   fi
 fi
+
+# Собираем список разрешённых origin для Control UI (HTTPS-домены + localhost для отладки)
+ORIGINS_JSON='['
+for d in "${DOMAIN:-}" "${DOMAIN_ALT:-}"; do
+  [[ -z "$d" ]] && continue
+  ORIGINS_JSON+="\"https://$d\","
+done
+ORIGINS_JSON+='"http://localhost:18789"]'
+export OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS="$ORIGINS_JSON"
+log "AllowedOrigins для Control UI: $ORIGINS_JSON"
+
+log "Запускаю официальный setup.sh с OPENCLAW_IMAGE=$OPENCLAW_IMAGE"
+cp "$REPO_DIR/.env" "$UPSTREAM_DIR/.env"
+(
+  cd "$UPSTREAM_DIR"
+  export OPENCLAW_IMAGE OPENCLAW_GATEWAY_PORT OPENCLAW_GATEWAY_BIND \
+         OPENCLAW_CONFIG_DIR OPENCLAW_WORKSPACE_DIR OPENCLAW_TZ \
+         OPENCLAW_GATEWAY_TOKEN GOG_KEYRING_PASSWORD \
+         OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS \
+         OPENCLAW_SKIP_ONBOARDING="${OPENCLAW_SKIP_ONBOARDING:-0}"
+  bash scripts/docker/setup.sh
+) || log "WARN: setup.sh завершился с ошибкой, но gateway-контейнер обычно остаётся работать"
+
+# --- 6. Caddy reverse proxy ---
+# (DOMAIN/DOMAIN_ALT уже определены выше, до setup.sh)
 
 if [[ -z "${ACME_EMAIL:-}" ]]; then
   export ACME_EMAIL="admin@${DOMAIN:-localhost}"
